@@ -78,24 +78,23 @@ def verify_admin_password(entered_password: str) -> bool:
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-if "admin_password_input" not in st.session_state:
-    st.session_state.admin_password_input = ""
 
 
 admin_col, chat_col = st.columns([1, 2], gap="large")
 
 with admin_col:
     st.subheader("Admin")
-    entered_admin_password = st.text_input(
-        "Admin password (required for each admin action)",
-        type="password",
-        key="admin_password_input",
-    )
 
     with st.expander("Backend Health", expanded=True):
-        if st.button("Check Backend Health", use_container_width=True):
-            allowed = verify_admin_password(entered_admin_password)
-            st.session_state.admin_password_input = ""
+        with st.form("backend_health_form", clear_on_submit=True):
+            health_password = st.text_input(
+                "Admin password",
+                type="password",
+                key="backend_health_password",
+            )
+            submitted = st.form_submit_button("Check Backend Health", use_container_width=True)
+        if submitted:
+            allowed = verify_admin_password(health_password)
             if allowed:
                 ok, payload = check_backend_health(backend_url)
                 if ok:
@@ -110,9 +109,15 @@ with admin_col:
             value=settings.policy_seed_url,
             help="Leave as default unless you want a different policy entry page.",
         )
-        if st.button("Run Incremental Re-Ingest", use_container_width=True):
-            allowed = verify_admin_password(entered_admin_password)
-            st.session_state.admin_password_input = ""
+        with st.form("ingest_run_form", clear_on_submit=True):
+            ingest_password = st.text_input(
+                "Admin password for re-ingest",
+                type="password",
+                key="ingest_run_password",
+            )
+            run_ingest = st.form_submit_button("Run Incremental Re-Ingest", use_container_width=True)
+        if run_ingest:
+            allowed = verify_admin_password(ingest_password)
             if allowed:
                 ok, payload = trigger_ingest(backend_url, seed_url=seed_url)
                 if ok:
@@ -121,9 +126,15 @@ with admin_col:
                     st.error("Ingestion request failed.")
                 st.json(payload)
 
-        if st.button("Refresh Ingestion Status", use_container_width=True):
-            allowed = verify_admin_password(entered_admin_password)
-            st.session_state.admin_password_input = ""
+        with st.form("ingest_status_form", clear_on_submit=True):
+            status_password = st.text_input(
+                "Admin password for status refresh",
+                type="password",
+                key="ingest_status_password",
+            )
+            refresh_status = st.form_submit_button("Refresh Ingestion Status", use_container_width=True)
+        if refresh_status:
+            allowed = verify_admin_password(status_password)
             if allowed:
                 ok, payload = fetch_ingest_status(backend_url)
                 if ok:
