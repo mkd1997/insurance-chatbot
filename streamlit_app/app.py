@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 
 import httpx
+import logging
 import streamlit as st
 
 # Streamlit Cloud may execute this file with only `streamlit_app/` on sys.path.
@@ -20,6 +21,7 @@ st.caption("Policy Q&A with ingestion controls and cited answers.")
 backend_url = settings.streamlit_backend_url.rstrip("/")
 st.write(f"Backend URL: `{backend_url}`")
 
+logger = logging.getLogger(__name__)
 
 def check_backend_health(base_url: str) -> tuple[bool, dict]:
     try:
@@ -146,6 +148,9 @@ with admin_col:
 with chat_col:
     st.subheader("Policy Chat")
     top_k = st.slider("Retrieved chunks (top_k)", min_value=1, max_value=20, value=6)
+    if st.button("Clear Chat"):
+        st.session_state.chat_history = []
+        st.rerun()
 
     with st.form("chat_form", clear_on_submit=True):
         question = st.text_area(
@@ -196,4 +201,4 @@ with chat_col:
 
         debug_scores = (response.get("retrieval_debug") or {}).get("top_k_scores", [])
         if debug_scores:
-            st.caption(f"Retrieval scores: {debug_scores}")
+            logger.info(f"Retrieval debug scores: {debug_scores}")
