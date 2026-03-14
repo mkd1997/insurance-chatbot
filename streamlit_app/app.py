@@ -46,7 +46,7 @@ def trigger_ingest(base_url: str, seed_url: str | None = None) -> tuple[bool, di
     if seed_url:
         payload["seed_url"] = seed_url.strip()
     try:
-        with httpx.Client(timeout=120.0) as client:
+        with httpx.Client(timeout=1200.0) as client:
             response = client.post(f"{base_url}/ingest", json=payload)
             response.raise_for_status()
             return True, response.json()
