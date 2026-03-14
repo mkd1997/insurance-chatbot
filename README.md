@@ -1,118 +1,262 @@
-## Insurance Chatbot
+# Insurance Policy Chatbot
 
-Step 1 scaffold is in place:
+## Introduction
 
-- `backend/app/main.py` provides a minimal FastAPI app with `GET /health`.
-- `backend/app/config.py` loads `.env` values via `pydantic-settings`.
-- `streamlit_app/app.py` provides a Streamlit shell to test backend health.
+Insurance Policy Chatbot is a Retrieval-Augmented Generation (RAG) application built to answer questions from health insurance policy documents hosted on a provider website. The system crawls policy pages and linked PDFs, extracts the document content, splits the text into semantically useful chunks, generates embeddings for those chunks, stores them in Qdrant, and uses an LLM to answer user questions from retrieved evidence.
 
-Step 2 API contracts are now scaffolded:
+The project is designed to be strict about grounding. If the relevant answer is not supported by the indexed policy documents, the chatbot responds that it does not know rather than fabricating an answer. In case it finds the relevant answer, the chatbot also gives citations for the answer.
 
-- `POST /ingest` accepts `{"mode":"incremental|full","seed_url": "...optional..."}`.
-- `GET /ingest/status` returns typed ingestion status metadata and counters.
-- `POST /chat` accepts `{"question":"...","top_k":6}` and currently returns a strict refusal stub.
+The system can crawl policy document website of any insurance provider and answer policy related questions for that insurance provider.
 
-Step 3 crawler scaffold is now added:
+### Features
 
-- `backend/app/crawler.py` implements Playwright-based policy link discovery.
-- Discovery is constrained to same-domain, policy-path URLs and classifies HTML vs PDF links.
-- Deterministic link filtering/classification tests are in `tests/test_crawler.py`.
+- Crawls policy content from a configured insurer policy URL using Playwright.
+- Extracts text from both HTML pages and PDF documents.
+- Chunks documents into retrieval-ready segments with deterministic document and chunk IDs.
+- Generates embeddings with OpenAI and stores vectors in Qdrant.
+- Supports incremental re-ingestion by detecting changed, unchanged, and stale documents.
+- Retrieves the most relevant chunks for a user question before sending context to the LLM.
+- Enforces strict refusal behavior when retrieval confidence is too low or supporting evidence is missing.
+- Returns citations for non-refusal answers.
+- Provides a Streamlit interface for chat, ingestion control, and ingestion status checks.
+- Protects admin actions in the Streamlit UI with an admin password.
 
-Step 4 extraction scaffold is now added:
+The app can be visited at: https://my-insurance-chatbot.streamlit.app/
 
-- `backend/app/extractor.py` parses HTML and PDF policy content into normalized text + metadata.
-- HTML extraction captures `title` and top section heading when present.
-- PDF extraction normalizes per-page text and preserves source metadata.
-- Unit tests are in `tests/test_extractor.py`.
+## User Guide
 
-Step 5 chunking scaffold is now added:
+### Ask Policy Questions
 
-- `backend/app/chunker.py` generates token-aware semantic chunks from extracted documents.
-- Deterministic IDs:
-  - `doc_id` from source URL + doc type
-  - `chunk_id` from doc ID + chunk index + chunk text
-- Chunk metadata includes `heading_path`, `token_count`, `chunk_index`, and source URL.
-- Unit tests are in `tests/test_chunker.py`.
+1. Open the Streamlit app.
+2. Go to the `Policy Chat` section.
+3. Enter your question in the text box.
+4. Optionally adjust the `Retrieved chunks (top_k)` slider.
+5. Click `Ask`.
+6. Review the answer shown in the chat history.
+7. If the answer is grounded in indexed policy content, review the citations shown below it.
+8. If the system cannot find enough supporting evidence, it will respond that it does not know the answer based on the provided policy documents.
 
-Step 6 embedding and vector-store scaffold is now added:
+### Refresh Ingestion Status
 
-- `backend/app/embeddings.py` adds OpenAI embedding generation (`OpenAIEmbeddingClient`).
-- `backend/app/vector_store.py` adds Qdrant collection setup + chunk upsert support.
-- Collection setup creates payload indexes for `doc_id` and `source_url`.
-- Unit tests are in `tests/test_embeddings.py` and `tests/test_vector_store.py`.
+1. Open the Streamlit app.
+2. Go to the `Admin` section.
+3. Expand `Ingestion`.
+4. Enter the admin password in the `Admin password for status refresh` field.
+5. Click `Refresh Ingestion Status`.
+6. Review the returned status payload for the latest ingestion state and counters.
 
-Step 7 incremental ingestion is now added:
+### Run Incremental Re-Ingestion
 
-- `backend/app/ingestion.py` orchestrates crawl -> extract -> hash compare -> chunk -> embed -> upsert.
-- Hash-based refresh behavior:
-  - unchanged docs are skipped,
-  - changed docs have old chunks deleted then replaced,
-  - stale docs (missing from latest crawl) are deleted from the vector store.
-- `POST /ingest` now runs incremental ingestion and updates status counters.
-- Unit regression coverage for changed/unchanged/stale document handling is in `tests/test_ingestion.py`.
+1. Open the Streamlit app.
+2. Go to the `Admin` section.
+3. Expand `Ingestion`.
+4. Review the `Optional seed URL override` value and change it only if needed.
+5. Enter the admin password in the `Admin password for re-ingest` field.
+6. Click `Run Incremental Re-Ingest`.
+7. Wait for the request to complete and review the returned response.
+8. Use `Refresh Ingestion Status` afterward to confirm the latest counters and completion state.
 
-Step 8 retrieval + strict refusal is now added:
+## High Level Diagram
 
-- `backend/app/qa.py` implements retrieval-driven answering with strict refusal thresholding.
-- `backend/app/vector_store.py` now supports scored nearest-neighbor retrieval (`search_chunks`).
-- `backend/app/llm.py` adds OpenAI chat answer generation constrained to retrieved context.
-- `POST /chat` now runs the QA flow and refuses when retrieval confidence is insufficient.
-- Unit coverage is in `tests/test_qa.py` and extended `tests/test_vector_store.py`.
+```mermaid
+flowchart TD
+    U[User] --> S[Streamlit UI]
 
-Step 9 citation enforcement is now added:
+    S -->|Ask question| B[FastAPI Backend]
+    S -->|Admin actions| B
 
-- Non-refusal answers must include valid citations (source URL + excerpt).
-- Citation output is deduplicated by source/section to avoid repeated references.
-- If an answer is generated but valid citations cannot be built, the response is forced to strict refusal.
+    subgraph IP["Ingestion Pipeline"]
+        B --> C[Crawler + Extractor]
+        C --> K[Semantic Chunker]
+        K --> E[OpenAI Embeddings API]
+        E --> Q[Qdrant Vector Database]
+    end
 
-Step 10 Streamlit UI is now added:
+    subgraph QP["Question Answering Pipeline"]
+        B --> QE[Question Embedding]
+        QE --> E
+        E --> R[Retriever]
+        Q --> R
+        R --> QA[QA Service]
+        QA --> L[OpenAI Chat Model]
+        L --> A[Answer + Citations]
+    end
 
-- `streamlit_app/app.py` includes admin controls for health check, re-ingest trigger, and ingestion status refresh.
-- Chat UI supports question submission, configurable `top_k`, response history, and citation rendering.
-- Non-refusal responses show citations and retrieval scores for traceability.
-- Admin actions now require entering `ADMIN_PASSWORD` for each button action.
+    A --> B
+    B --> S
+    S --> U
 
-Step 11 hardening and deployment notes are now added:
-
-- Basic structured logging is enabled in backend startup.
-- Retry logic is applied to outbound network calls (OpenAI embeddings/chat and document fetches).
-- README now includes a deployment configuration and smoke checklist.
-
-### Environment setup
-
-Create a `.env` file in the project root and fill at least:
-
-- `OPENAI_API_KEY`
-- `QDRANT_URL`
-- `QDRANT_API_KEY` (if required)
-- `ADMIN_PASSWORD`
-
-### Streamlit Community Cloud deployment notes
-
-- Set the same values in Streamlit secrets/environment configuration.
-- Ensure backend URL is reachable from Streamlit app:
-  - `STREAMLIT_BACKEND_URL=<your-fastapi-url>`
-- Keep `ADMIN_PASSWORD` secret only in deployment settings (never commit it).
-
-### Run backend
-
-```bash
-conda run -n insurance-chatbot uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
+    linkStyle 0 stroke:#000000,stroke-width:2px;
+    linkStyle 1 stroke:#ff0000,stroke-width:2px;
+    linkStyle 2 stroke:#0000ff,stroke-width:2px;
+    linkStyle 3 stroke:#0000ff,stroke-width:2px;
+    linkStyle 4 stroke:#0000ff,stroke-width:2px;
+    linkStyle 5 stroke:#0000ff,stroke-width:2px;
+    linkStyle 6 stroke:#0000ff,stroke-width:2px;
+    linkStyle 7 stroke:#ff0000,stroke-width:2px;
+    linkStyle 8 stroke:#ff0000,stroke-width:2px;
+    linkStyle 9 stroke:#ff0000,stroke-width:2px;
+    linkStyle 10 stroke:#ff0000,stroke-width:2px;
+    linkStyle 11 stroke:#ff0000,stroke-width:2px;
+    linkStyle 12 stroke:#ff0000,stroke-width:2px;
+    linkStyle 13 stroke:#ff0000,stroke-width:2px;
+    linkStyle 14 stroke:#ff0000,stroke-width:2px;
+    linkStyle 15 stroke:#000000,stroke-width:2px;
 ```
 
-### Run Streamlit shell
+## Low Level Diagrams
 
-```bash
-conda run -n insurance-chatbot streamlit run streamlit_app/app.py
+### Ingestion Pipeline
+
+```mermaid
+flowchart TD
+    A[POST /ingest] --> B[Build IngestionService]
+    B --> C[Ensure Qdrant Collection]
+    C --> D[Crawl Policy Links]
+    D --> E[Fetch HTML and PDF Documents]
+    E --> F[Extract Normalized Text]
+    F --> G[Build Document Records]
+    G --> H[Compute Content Hashes]
+    H --> I[Fetch Existing Hashes from Qdrant]
+    I --> J[Detect Changed and Stale Documents]
+    J --> K[Chunk Changed Documents]
+    K --> L[Delete Old Chunks for Changed and Stale Docs]
+    L --> M[Generate Embeddings for New Chunks]
+    M --> N[Upsert Chunks into Qdrant]
+    N --> O[Update Ingestion Status Counters]
 ```
 
-### Smoke checklist
+### Retrieval and QA Pipeline
 
-1. Start backend and Streamlit successfully.
-2. Health check works from Streamlit admin panel (with admin password).
-3. Run incremental re-ingest and confirm `completed` with counters > 0.
-4. Ask a known in-scope policy question and verify:
-   - non-refusal answer,
-   - citations shown.
-5. Ask an out-of-scope question and verify strict refusal:
-   - `I don't know based on the provided policy documents.`
+```mermaid
+flowchart TD
+    A[POST /chat] --> B[Build QAService]
+    B --> C[Embed User Question]
+    C --> D[Search Qdrant for Top K Chunks]
+    D --> E[Collect Retrieval Scores]
+    E --> F{Top Score >= Threshold?}
+    F -->|No| G[Return Strict Refusal]
+    F -->|Yes| H[Send Retrieved Context to OpenAI Chat Model]
+    H --> I[Generate Answer]
+    I --> J{Valid Citations Available?}
+    J -->|No| G
+    J -->|Yes| K[Build Citation List]
+    K --> L[Return Answer with Citations]
+```
+
+### Vector Store Interactions
+
+```mermaid
+flowchart TD
+    A[QdrantChunkStore] --> B[Ensure Collection Exists]
+    B --> C[Create Payload Index: doc_id]
+    C --> D[Create Payload Index: source_url]
+    D --> E[Create Payload Index: content_hash]
+
+    A --> F[Fetch Existing Document Hashes]
+    F --> G[Scroll Through Stored Points]
+    G --> H[Build doc_id to content_hash Map]
+
+    A --> I[Delete Chunks by doc_id]
+    I --> J[Build Qdrant Filter]
+    J --> K[Delete Matching Points]
+
+    A --> L[Upsert Chunks]
+    L --> M[Build Point Payloads]
+    M --> N[Store Vectors and Metadata]
+
+    A --> O[Search Chunks]
+    O --> P[Query by Question Vector]
+    P --> Q[Return Scored Retrieved Chunks]
+```
+
+### Crawler and Extraction Flow
+
+```mermaid
+flowchart TD
+    A[Seed Policy URL] --> B[Playwright Opens Page]
+    B --> C[Collect Anchor href Values]
+    C --> D[Normalize URLs]
+    D --> E[Filter Same Domain Links]
+    E --> F[Filter Policy Scoped Links]
+    F --> G[Classify HTML and PDF URLs]
+    G --> H[CrawlResult]
+
+    H --> I[Fetch HTML URL]
+    H --> J[Fetch PDF URL]
+
+    I --> K[Parse HTML with BeautifulSoup]
+    K --> L[Remove script and style Tags]
+    L --> M[Extract Title Section and Text]
+    M --> N[Build ExtractedDocument for HTML]
+
+    J --> O[Read PDF with pypdf]
+    O --> P[Extract Page Text]
+    P --> Q[Normalize Text]
+    Q --> R[Build ExtractedDocument for PDF]
+```
+
+## Architecture Notes
+
+- `streamlit_app/app.py`
+  - Implements the Streamlit user interface.
+  - Handles chat requests, admin actions, and rendering of answers, citations, and ingestion status.
+
+- `backend/app/main.py`
+  - Exposes the FastAPI routes: `/health`, `/ingest`, `/ingest/status`, and `/chat`.
+  - Builds and connects the ingestion and QA services.
+
+- `backend/app/ingestion.py`
+  - Orchestrates the incremental ingestion workflow.
+  - Coordinates crawling, extraction, content hashing, chunking, embedding generation, stale chunk deletion, and vector upserts.
+
+- `backend/app/crawler.py`
+  - Discovers in-scope policy URLs using Playwright.
+  - Filters links by domain and policy-related path rules, then separates HTML and PDF targets.
+
+- `backend/app/extractor.py`
+  - Extracts normalized content from HTML pages and PDF documents.
+  - Produces `ExtractedDocument` objects used by later pipeline stages.
+
+- `backend/app/chunker.py`
+  - Splits extracted documents into token-aware chunks.
+  - Generates deterministic document IDs and chunk IDs.
+
+- `backend/app/embeddings.py`
+  - Calls the OpenAI embeddings API for document chunks and user questions.
+
+- `backend/app/vector_store.py`
+  - Encapsulates all Qdrant operations.
+  - Handles collection initialization, payload indexing, document hash lookup, chunk deletion, vector upsert, and retrieval.
+
+- `backend/app/qa.py`
+  - Implements retrieval-driven answer generation logic.
+  - Applies retrieval threshold checks and citation enforcement before returning a response.
+
+- `backend/app/llm.py`
+  - Sends retrieved context to the OpenAI chat model.
+  - Produces the final grounded answer text.
+
+- `backend/app/config.py`
+  - Loads application configuration from environment variables.
+  - Centralizes runtime settings for backend, models, vector database, and admin controls.
+
+## Project Limitations
+
+- Crawling behavior depends on the structure and accessibility of the target insurer website.
+  - Sites with aggressive bot protection, authentication redirects, or dynamic content restrictions may reduce ingestion reliability.
+
+- The system is document-grounded only.
+  - It does not use external domain knowledge beyond the indexed policy content.
+  - If relevant information is not present in the ingested documents, the chatbot will refuse to answer.
+
+- Retrieval quality depends on chunking quality, embedding quality, and the configured similarity threshold.
+  - Some valid answers may still be refused if the most relevant chunks do not score above threshold.
+
+- OpenAI API rate limits and quota limits can affect both ingestion and question-answering latency or success.
+
+- The ingestion flow is currently synchronous.
+  - Large re-ingestion runs may take time and can block the request until completion.
+
+- Admin protection in the Streamlit app is password-based only.
+  - It is suitable for basic control but is not a full authentication and authorization system.

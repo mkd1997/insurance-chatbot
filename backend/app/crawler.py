@@ -84,7 +84,7 @@ async def crawl_policy_links(
     seed_url: str,
     *,
     max_pages: int = 40,
-    timeout_ms: int = 20_000,
+    timeout_ms: int = 20000,
 ) -> CrawlResult:
     seed = normalize_url(seed_url)
     queue: deque[str] = deque([seed])
