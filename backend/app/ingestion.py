@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from .chunker import build_doc_id, chunk_document
 from .crawler import CrawlResult, crawl_policy_links
@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 def compute_content_hash(text: str) -> str:
     normalized = " ".join(text.split())
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _should_retry_fetch(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        if status_code in (403, 404):
+            return False
+    return True
 
 
 class IngestionService:
@@ -44,14 +52,22 @@ class IngestionService:
         logger.info("Starting crawl for seed URL: %s", seed_url)
         return asyncio.run(crawl_policy_links(seed_url))
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
+    @retry(
+        retry=retry_if_exception(_should_retry_fetch),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+    )
     def _fetch_html(self, url: str) -> str:
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             response = client.get(url)
             response.raise_for_status()
             return response.text
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
+    @retry(
+        retry=retry_if_exception(_should_retry_fetch),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+    )
     def _fetch_pdf(self, url: str) -> bytes:
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             response = client.get(url)
@@ -78,12 +94,32 @@ class IngestionService:
 
         extracted_docs: list[ExtractedDocument] = []
         for html_url in crawl_result.html_urls:
-            html = self._html_fetcher(html_url)
-            extracted_docs.append(extract_html_document(html_url, html))
+            try:
+                html = self._html_fetcher(html_url)
+                extracted_docs.append(extract_html_document(html_url, html))
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (403, 404):
+                    logger.warning(
+                        "Skipping HTML URL due to non-retriable status %d: %s",
+                        exc.response.status_code,
+                        html_url,
+                    )
+                    continue
+                raise
 
         for pdf_url in crawl_result.pdf_urls:
-            pdf_bytes = self._pdf_fetcher(pdf_url)
-            extracted_docs.append(extract_pdf_document(pdf_url, pdf_bytes))
+            try:
+                pdf_bytes = self._pdf_fetcher(pdf_url)
+                extracted_docs.append(extract_pdf_document(pdf_url, pdf_bytes))
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (403, 404):
+                    logger.warning(
+                        "Skipping PDF URL due to non-retriable status %d: %s",
+                        exc.response.status_code,
+                        pdf_url,
+                    )
+                    continue
+                raise
 
         current_docs = [self._to_document_record(doc) for doc in extracted_docs]
         docs_by_id = {doc.doc_id: doc for doc in current_docs}

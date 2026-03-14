@@ -1,10 +1,12 @@
 import unittest
 from dataclasses import dataclass
 
+import httpx
+
 from backend.app.chunker import build_doc_id
 from backend.app.crawler import CrawlResult
 from backend.app.extractor import ExtractedDocument, extract_html_document
-from backend.app.ingestion import IngestionService, compute_content_hash
+from backend.app.ingestion import IngestionService, _should_retry_fetch, compute_content_hash
 
 
 @dataclass
@@ -110,6 +112,57 @@ class IngestionServiceTests(unittest.TestCase):
         self.assertIn(stale_doc_id, store.deleted_doc_ids or [])
         self.assertNotIn(unchanged_doc_id, store.deleted_doc_ids or [])
         self.assertEqual(embeddings.calls, 1)
+
+    def test_incremental_skips_403_and_404_fetch_failures(self) -> None:
+        seed = "https://www.uhcprovider.com/en/policies-protocols/commercial-policies/root.html"
+        ok_html_url = "https://www.uhcprovider.com/en/policies-protocols/commercial-policies/ok.html"
+        forbidden_html_url = "https://www.uhcprovider.com/en/policies-protocols/commercial-policies/forbidden.html"
+        missing_pdf_url = "https://www.uhcprovider.com/en/policies-protocols/commercial-policies/missing.pdf"
+
+        store = _FakeStore(existing_hashes={})
+        embeddings = _FakeEmbeddingClient()
+
+        def crawl_func(_seed: str) -> CrawlResult:
+            return CrawlResult(
+                html_urls=[ok_html_url, forbidden_html_url],
+                pdf_urls=[missing_pdf_url],
+            )
+
+        def html_fetcher(url: str) -> str:
+            if url == forbidden_html_url:
+                request = httpx.Request("GET", url)
+                response = httpx.Response(403, request=request)
+                raise httpx.HTTPStatusError("Forbidden", request=request, response=response)
+            return "<html><body><h1>Policy</h1><p>Reachable content.</p></body></html>"
+
+        def pdf_fetcher(url: str) -> bytes:
+            request = httpx.Request("GET", url)
+            response = httpx.Response(404, request=request)
+            raise httpx.HTTPStatusError("Not found", request=request, response=response)
+
+        service = IngestionService(
+            store=store,  # type: ignore[arg-type]
+            embedding_client=embeddings,  # type: ignore[arg-type]
+            crawler_func=crawl_func,
+            html_fetcher=html_fetcher,
+            pdf_fetcher=pdf_fetcher,
+        )
+
+        counters = service.run_incremental(seed_url=seed)
+
+        self.assertEqual(counters.discovered_urls, 3)
+        self.assertEqual(counters.processed_docs, 1)
+        self.assertGreaterEqual(counters.upserted_chunks, 1)
+        self.assertEqual(embeddings.calls, 1)
+
+    def test_retry_filter_does_not_retry_403_or_404(self) -> None:
+        for status_code in (403, 404):
+            request = httpx.Request("GET", f"https://example.com/{status_code}")
+            response = httpx.Response(status_code, request=request)
+            exc = httpx.HTTPStatusError("status error", request=request, response=response)
+            self.assertFalse(_should_retry_fetch(exc))
+
+        self.assertTrue(_should_retry_fetch(httpx.ConnectError("boom")))
 
 
 if __name__ == "__main__":
